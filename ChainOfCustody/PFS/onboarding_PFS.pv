@@ -1,0 +1,83 @@
+(* ========== 1. Tipi, funzioni =================================== *)
+type G. type exponent.
+const g:G [data].
+fun exp(G,exponent):G.
+equation forall x:exponent,y:exponent; exp(exp(g,x),y)=exp(exp(g,y),x).
+
+type key.
+fun senc(bitstring,G):bitstring.
+reduc forall m:bitstring,K:G; sdec(senc(m,K),K)=m.
+
+fun senc_key(key,G):bitstring.
+reduc forall k1:key,K:G; sdec_key(senc_key(k1,K),K)=k1.
+
+type skey. type pkey.
+fun pk(skey):pkey.
+fun aenc(bitstring,pkey):bitstring.
+reduc forall m:bitstring,sk:skey; adec(aenc(m,pk(sk)),sk)=m.
+
+fun h(bitstring):bitstring.
+fun f(bitstring):key.
+fun concat(bitstring,bitstring):bitstring.
+fun concat_key(key,key):bitstring.
+
+(* ========== 2. Costanti e canali ================================= *)
+free w_D:bitstring [private].  free N_D:bitstring [private].
+free B_D:bitstring [private].
+
+free c : channel [private].
+free c1: channel [private].
+free c2: channel.
+
+(* ========== 3. Eventi =========================================== *)
+event ev_key_D(key).
+event ev_key_G(key).
+
+(* ========== 4. Query PFS ======================================== *)
+query k:key; attacker(k).          
+
+(* ========== 5. Processi di ruolo ================================ *)
+let SmartApp(e_G:pkey,N_D:bitstring,w_D:bitstring,B_D:bitstring) =
+  let M = aenc((w_D,B_D),e_G) in
+  out(c,(M,N_D)).
+
+let SUP(e_G:pkey) =
+  in(c,(M:bitstring,N:bitstring)); out(c1,M).
+
+let Gateway(e1_G:G,d1_G:exponent,e_G:pkey,d_G:skey) =
+  in(c1,M:bitstring);
+  let (w_D:bitstring,B_D:bitstring) = adec(M,d_G) in
+  new challenge:bitstring; out(c2,challenge);
+  in(c2,response:bitstring);
+  if response = h(concat(challenge,w_D)) then
+    out(c2,e1_G);
+    in(c2,(e1_D:G,Enc_k:bitstring));
+    let K = exp(e1_D,d1_G) in
+    let z = sdec_key(Enc_k,K) in
+    event ev_key_G(z);
+    let W = f(w_D) in
+    out(c2,h(h(concat_key(z,W))));
+    in(c2,_:bitstring).
+
+let IoT_Device(e1_D:G,d1_D:exponent,w_D:bitstring,B_D:bitstring,N_D:bitstring) =
+  in(c2,challenge:bitstring);
+  out(c2,h(concat(challenge,w_D)));
+  in(c2,e1_G:G);
+  let K = exp(e1_G,d1_D) in
+  new k:key; event ev_key_D(k);
+  let Enc_k = senc_key(k,K) in
+  out(c2,(e1_D,Enc_k));
+  in(c2,_:bitstring).
+
+(* ========== 6. Processo principale con le fasi ================== *)
+process
+  new d1_G:exponent; let e1_G = exp(g,d1_G) in
+  new d1_D:exponent; let e1_D = exp(g,d1_D) in
+  new d_G :skey;     let e_G  = pk(d_G)   in
+
+  ( !SmartApp(e_G,N_D,w_D,B_D)
+  | !SUP(e_G)
+  | !Gateway(e1_G,d1_G,e_G,d_G)
+  | !IoT_Device(e1_D,d1_D,w_D,B_D,N_D)
+  | phase 1; out(c2,d1_G)          (* leak del DH long-term *)
+  )

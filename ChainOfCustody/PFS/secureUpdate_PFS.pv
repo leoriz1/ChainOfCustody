@@ -1,0 +1,294 @@
+(* ECDH *)
+type G.
+type exponent.
+
+const g: G [data].
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+
+(* Declarations for image and poster data types *)
+type image.
+type manifest.
+
+(* Simmetric key encryption *)
+type key.
+fun senc(bitstring, key): bitstring.
+reduc forall m: bitstring, k: key; sdec(senc(m, k), k) = m.
+fun senc_key(key, G): bitstring.
+reduc forall k1: key, k2: G; sdec_key(senc_key(k1, k2), k2) = k1.
+
+(* Asymmetric key encryption *)
+type skey.
+type pkey.
+fun pk(skey): pkey.
+fun aenc(bitstring, pkey): bitstring.
+reduc forall m: bitstring, sk: skey; adec(aenc(m, pk(sk)), sk) = m.
+
+(* Digital signatures *)
+type sskey.
+type spkey.
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m: bitstring, ssk: sskey; getmess(sign(m, ssk)) = m.
+reduc forall m: bitstring, ssk: sskey; checksign(sign(m, ssk), spk(ssk)) = m.
+
+(* Converters *)
+fun image_to_bitstring(image): bitstring [data, typeConverter].
+fun manifest_to_bitstring(manifest): bitstring [data, typeConverter].
+
+
+
+
+(* Operations on timestamps *)
+type result.
+fun ok(): result.
+
+type timestamp.
+fun succ(timestamp): timestamp.
+reduc forall t:timestamp, t1:timestamp; check_succ(succ(t),t) = ok().
+
+
+
+
+(* Channels *)
+free c1: channel [private].  (* Channel between SUP and Gateway (TLS) *)
+free c2: channel.              (* Bluetooth channel between Gateway and IoT device *)
+
+(* Constant for the initial timestamp value *)
+const init_time: timestamp.
+
+fun concatManifestTimestamp(manifest, timestamp): manifest.
+reduc forall m: manifest, t: timestamp; get_timestamp(concatManifestTimestamp(m, t)) = t.
+
+(* Function to embed the next public verification key in the current software image *)
+fun embed_key(image, spkey): image.
+reduc forall img: image, k: spkey; extract_key(embed_key(img, k)) = k.
+
+free w_D: bitstring [private].               (* IoT device password *)
+free K: key [private].                        (* Session key between Gateway and IoT device *)
+free K1: key .                       (* Session key between Gateway and IoT device for second update, NON PIU PRIVATE PER TESTARE PFS *)
+free knownData_D: bitstring [private].        (* IoT device metadata *)
+
+
+
+
+
+free image0: image [private].               (* Initial image of the IoT device *)
+
+
+
+
+(* Events *)
+(* Authenticity of the manifest *)
+event manifest_sent(manifest, timestamp).
+event manifest_verified(manifest, timestamp).
+(* Authenticity of the image *)
+event image_sent(image).
+event image_verified(image).
+(* Succession of timestamps (anti manifest replay)*)
+event freshness_ok(timestamp, timestamp).
+event freshness_ok_1(timestamp, timestamp).
+(* Correspondence between embedd key and extracted key *)
+event next_key_generated(spkey).
+event next_key_extracted(spkey).
+
+
+(* Query *)
+
+query attacker (w_D).
+query attacker (K).
+query attacker (K1).
+
+query m: manifest, t: timestamp; event(manifest_verified(m,t)) ==> inj-event(manifest_sent(m,t)).
+query i: image; event(image_verified(i)) ==> inj-event(image_sent(i)).
+
+query t1: timestamp, t2: timestamp; event(freshness_ok_1(t1, t2)) ==> inj-event(freshness_ok(t1, t2)).
+
+query k: spkey; event(next_key_extracted(k)) ==> inj-event(next_key_generated(k)).
+
+
+
+
+
+
+
+(* === Processes === *)
+
+
+let SUP(sk_S: sskey, image0: image, manifest: manifest, ts: timestamp) =
+  (* 2. SUP receives the metadata request from the Gateway *)
+  in(c1, knownData_D: bitstring);
+  (* 3. SUP checks the request (update, here omitted) and generates the new timestamp *)
+  let new_ts = succ(ts) in
+  (* 4. SUP signs the manifest with the concatenated timestamp, as this is 
+  the first time it does so with the manufacturer's shared signature private key *)
+  let manifest_with_timestamp = concatManifestTimestamp(manifest, new_ts) in
+  (* 5. SUP sends the signed manifest to the 
+  Gateway (‘The SUP sends M1 = (Ss (MT(D)), MT(D)) to G over TLS.’) *)
+  out(c1, ((sign(manifest_to_bitstring(manifest_with_timestamp), sk_S)), manifest_with_timestamp));  
+  event manifest_sent(manifest_with_timestamp, new_ts);
+
+  (* 14. SUP receives the request from the G *)
+  in(c1, manifest_with_timestamp_received: manifest);
+  (* 15. SUP generates the next private key (and calculates the corresponding public key) with which it will sign the next software update.
+  SUP then signs the current image with the private key (THIS IS THE FIRST UPDATE, SO NOW USES THE MANUFACTURER'S 
+  OF THE MANUFACTURER) and sends it to G in the form M2 = (Ss (IT(D)), IT(D)), after embedding the next public key 
+  into the image itself *)
+  new ver_skey: sskey; (* generates the next private key with which it will sign the next update *)
+  let ver_pkey = spk(ver_skey) in (* calculates the relative public key*)
+  event next_key_generated(ver_pkey);
+  let img_with_key = embed_key(image0, ver_pkey) in (* embeds the next public key in the current image *)
+  event image_sent(img_with_key);
+  out(c1, (sign(image_to_bitstring(img_with_key), sk_S), img_with_key)); (* send the signed image to G *)
+
+
+  (* SECOND UPDATE*)
+
+
+  (* 22. the SUP receives the request to send the software image from the G (omitted) and generates the new timestamp *)
+  let new_ts_1 = succ(new_ts) in
+  new manifest1: manifest;
+  (* 23. the SUP signs the new manifest with the new timestamp with 
+  the current private key and sends it to the G in the form M3 = (Ss (IT(D)), IT(D)) *)
+  let manifest_with_timestamp_1 = concatManifestTimestamp(manifest1, new_ts_1) in
+  (* 24. SUP sends the manifest signed with the new private key to the G *)
+  out(c1, ((sign(manifest_to_bitstring(manifest_with_timestamp_1), ver_skey)), manifest_with_timestamp_1));  
+  (* 33 SUP receives new request from the G *)
+  in(c1, manifest_with_timestamp_received_1: manifest);
+  (* 34. SUP generates the next private key (and calculates the corresponding public key) with 
+  which it will sign the next software update.
+  SUP then signs the current image with the current private 
+  key (i.e. the one it generated in the previous case), after embedding 
+  the next public key in the image itself *)
+  new ver_skey1: sskey; (* Generates the next private key with which it will sign the next update *)
+  let ver_pkey1 = spk(ver_skey1) in (* Calculates the relative public key*)
+  new img1: image;
+  let img_with_key1 = embed_key(img1, ver_pkey1) in (* embeds the next public key in the current image *)
+  out(c1, (sign(image_to_bitstring(img_with_key1), ver_skey), img_with_key1)); (* Send the signed image to G*)
+
+  0.
+
+
+
+
+
+
+
+let Gateway(knownData_D: bitstring, K: key, K1: key, w_D: bitstring) =
+  (* 1. G sends knownData_D as a request for metadata referring to device D, to the SUP *)
+  out(c1, knownData_D);
+  (* 6. G receives the manifest signed by the SUP *)
+  in(c1, (signature: bitstring, manifest_with_timestamp: manifest));
+  (* 7. G forwards the message received from the SUP to D, encrypting it with the session key K (establishment of K omitted, already done in onboarding) *)
+  out(c2, senc((signature, manifest_with_timestamp), K));
+  (* 12. G receives the message forwarded by D *)
+  in(c2, confirm: bitstring);
+  (* 13. G asks the SUP to send him the software image by sending him the manifest*)
+  out(c1, manifest_with_timestamp);
+  (* 16. G receives the software image signed by the SUP, which also contains the embedded verNextKey *)
+  in(c1, (sig: bitstring, img: image));
+  (* 17. G forwards the message received from the SUP to D, encrypting it with the session key K *)
+  out(c2, senc((sig, img), K));
+
+  
+  (* SECOND UPDATE*)
+
+
+  (* 25. G receives new manifest signed by the SUP *)
+  in(c1, (signature1: bitstring, manifest_with_timestamp_1: manifest));
+  (* 26. G forwards the message received from the SUP to D, encrypting it with the (new) session key K1 *)
+  out(c2, senc((signature1, manifest_with_timestamp_1), K1));
+  (* 31. G receives the message forwarded by D *)
+  in(c2, confirm1: bitstring);
+  (* 32. G asks the SUP to send him the new image by sending him the new manifest *)
+  out(c1, manifest_with_timestamp_1);
+  (* 35. G receives the new software image signed by the SUP, which also contains the embeddable verNextKey *)
+  in(c1, (sig1: bitstring, img1: image));
+  (* 36. G forwards the message received from the SUP to D, encrypting it with the (new) session key K1 *)
+  out(c2, senc((sig1, img1), K1));
+
+  0.
+
+
+
+
+
+
+
+let IoT_Device(current_key: spkey, SUP_pkey:spkey, device_info: bitstring, current_version: bitstring, K: key, K1:key, ts: timestamp) =
+  (* 8. D receives the manifest forwarded by G *)
+  in(c2, enc: bitstring);
+  let (signature: bitstring, manifest_with_timestamp: manifest) = sdec(enc, K) in
+  (* 9. D verifies the digital signature of the manifest *)
+  if checksign(signature, SUP_pkey) = manifest_to_bitstring(manifest_with_timestamp) then
+    (* D validates the device model number, manufacturer information, software version (omesso) *)
+    (* 10. D verifies that the timestamp is fresh compared to the one it already has *)
+    let t_received = get_timestamp(manifest_with_timestamp) in
+
+    if check_succ(ts, t_received) = ok() then
+      event manifest_verified(manifest_with_timestamp, t_received);
+      event freshness_ok(ts, t_received);
+      (* 11. D communicates success to G *)
+      new confirm: bitstring;
+      out(c2, confirm);
+      (* 18. D receives M2 forwarded by G and decrypts it with K *)
+      in(c2, encrypted : bitstring);
+      let (sig:bitstring, img:image) = sdec(encrypted, K) in
+      (* 19. D verifies the digital signature of the image software *)
+      if checksign(sig, SUP_pkey) = image_to_bitstring(img) then
+        event image_verified(img);
+        (* 20. D starts the installation of the new image software *)
+        (* 21. D extracts from the image just received the key that it will use for the next verification and saves it *)
+        let ver_next_key = extract_key(img) in (* public key that D will use to verify the next image *)
+        event next_key_extracted(ver_next_key);
+      
+
+
+        (* SECOND UPDATE*)
+
+        
+        (* 27. D receives the manifest forwarded by G and decrypts it with K1 *)
+        in(c2, encrypted1 : bitstring);
+        let(signature1:bitstring, manifest_with_timestamp_1:manifest) = sdec(encrypted1, K1) in
+        (* 28. D verifies the digital signature of the new manifest with the new key *)
+        if checksign(signature1, ver_next_key) = manifest_to_bitstring(manifest_with_timestamp_1) then
+          (* D convalida il numero di modello del dispositivo, le informazioni sul produttore, la versione del software (omesso) *)
+          (* 29. D checks that the timestamp is fresh from the last one it knows *)
+          let t_received_1 = get_timestamp(manifest_with_timestamp_1) in
+          if check_succ(t_received, t_received_1) = ok() then
+            event manifest_verified(manifest_with_timestamp_1, t_received_1);
+            event freshness_ok_1(t_received, t_received_1);
+            (* 30. D communicates success to G *)
+            new confirm1: bitstring;
+            out(c2, confirm1);
+            (* 37. D receives M2 forwarded by G and decrypts it with K1 *)
+            in(c2, encrypted1 : bitstring);
+            let (sig1:bitstring, img1:image) = sdec(encrypted1, K1) in
+            (* 38. D verifies the digital signature of the image software *)
+            if checksign(sig1, ver_next_key) = image_to_bitstring(img1) then
+              (* 39. D starts the installation of the new image software *)
+              (* 40. D extracts from the image just received the key that it will use for the next verification and saves it*)
+              let ver_next_key1 = extract_key(img1) in (* key that D will use to verify the next image *)
+              
+              (* AND SO ON WITH FUTURE UPDATES, THE PROCESS IS THE SAME USING THE SAME KEY LOCKING MECHANISM *)
+
+  0.
+
+query attacker (image0).  (*NUOVA QUERY AGGIUNTA PER LA PFS*)
+
+
+process
+  new current_key: spkey;
+  new device_info: bitstring;
+  new current_version: bitstring;
+  new ssk: sskey;
+  let psk = spk(ssk) in
+  new ver_key: spkey;
+  new manifest: manifest;
+  (
+    let ts = init_time in   
+    (! SUP(ssk, image0, manifest, ts))
+    | (! Gateway(knownData_D, K, K1, w_D))
+    | (! IoT_Device(current_key, psk, device_info, current_version, K, K1,ts))
+  )
