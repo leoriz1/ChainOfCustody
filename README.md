@@ -22,8 +22,8 @@ The repository is organized as follows:
 -   `secureUpdate.pv`: ProVerif model for the secure update phase.
 -   `PFS/onboarding_PFS.pv`: ProVerif model for the onboarding phase, including Perfect Forward Secrecy.
 -   `PFS/secureUpdate_PFS.pv`: ProVerif model for the secure update phase, including Perfect Forward Secrecy.
--   `OTA_Protocol.pdf`: The original paper describing the protocol under analysis.
--   `README.md`: This file.
+-   `OTA_Protocol.pdf`: The final report describing the protocol under analysis.
+
 
 ## How to Run the Analysis
 
